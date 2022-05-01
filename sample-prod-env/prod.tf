@@ -26,69 +26,104 @@ resource "aws_default_subnet" "default_az_b" {
   }
 }
 
-resource "aws_security_group" "prod_web"{
-  name        = "prod_web"
-  description = "Allow standard http and https ports inbound and everything outbound" 
-
-  ingress { 
-    from_port   = 80 
-    to_port     = 80 
-    protocol    = "tcp"
-    cidr_blocks = ["x.x.x.x/32"]
-  }
+resource "aws_security_group" "prod_web_instance" {
+  name = "prod-web-instance"
   ingress {
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["x.x.x.x/32"]
+    from_port       = 80
+    to_port         = 80
+    protocol        = "tcp"
+    security_groups = [aws_security_group.prod_web_lb.id]
   }
+
   egress {
-    from_port   = 0 
+    from_port       = 0
+    to_port         = 0
+    protocol        = "-1"
+    security_groups = [aws_security_group.prod_web_lb.id]
+  }
+
+  tags = {
+    "Terraform_managed": "true"
+  }
+}
+
+resource "aws_security_group" "prod_web_lb" {
+  name = "prod-web-lb"
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
-  } 
-
-  tags = { 
-    "Terraform_managed": "true"
   }
-}
-
-resource "aws_instance" "prod_web"{
-  count = 2
-  
-  ami           = "ami-065fb54436c0e2d57"
-  instance_type = "t2.nano"
- 
-  vpc_security_group_ids = [
-    aws_security_group.prod_web.id 
-  ]
 
   tags = {
     "Terraform_managed": "true"
   }
-}
 
-resource "aws_eip" "prod_web" {
-  tags = {
-    "Terraform_managed": "true"
-  }
-  
-  instance = aws_instance.prod_web.0.id
 }
 
 resource "aws_elb" "prod_web_lb" {
-  name = "prod-web-lb"
-  
-  instances        = aws_instance.prod_web.*.id 
+  name            = "prod-web-lb"
   subnets         = [aws_default_subnet.default_az_a.id, aws_default_subnet.default_az_b.id]
-  security_groups = [aws_security_group.prod_web.id]
-
+  security_groups = [aws_security_group.prod_web_lb.id]
   listener {
-    instance_port     = 80 
+    lb_port = 80
+    lb_protocol = "http"
+    instance_port = "80"
     instance_protocol = "http"
-    lb_port           = 80 
-    lb_protocol       = "http"
   }
 } 
 
+resource "aws_lb_listener" "prod_web" {
+  load_balancer_arn = aws_elb.prod_web_lb.arn
+  port              = "80"
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.prod_web.arn
+  }
+}
+
+ resource "aws_lb_target_group" "prod_web" {
+   name     = "prod-web"
+   port     = 80
+   protocol = "HTTP"
+ }
+
+resource "aws_launch_configuration" "prod_web" {
+  name_prefix     = "prod-web-aws-asg-"
+  image_id        = "ami-065fb54436c0e2d57"
+  instance_type   = "t2.nano"
+  security_groups = [aws_security_group.prod_web_instance.id]
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_autoscaling_group" "prod_web" {
+  vpc_zone_identifier = [aws_default_subnet.default_az_a.id, aws_default_subnet.default_az_b.id]
+  desired_capacity    = 2
+  max_size            = 2
+  min_size            = 1
+  launch_configuration = aws_launch_configuration.prod_web.name 
+ 
+  tag {
+    key = "Terraform_managed"
+    value = "true"
+    propagate_at_launch = true
+  }
+}
+
+resource "aws_autoscaling_attachment" "prod_web" {
+  autoscaling_group_name = aws_autoscaling_group.prod_web.id
+  elb                    = aws_elb.prod_web_lb.id
+}
